@@ -72,34 +72,54 @@ def clean_muddy_audio(audio, sr=44100, intensity='medium'):
     清理浑浊音频，支持不同强度的处理
     intensity: 'light', 'medium', 'strong'
     """
+    # 检查音频长度
+    min_length = 32  # 最小所需长度
+    if len(audio) < min_length:
+        return audio
+        
     # 根据强度设置参数
     if intensity == 'light':
-        hp_freq = 200
-        bp_freqs = [1500, 6000]
-        mix_ratio = 0.8
+        hp_freq = 150    # 稍微提高高通频率
+        bp_freqs = [1000, 5000]  # 缩小带通范围
+        mix_ratio = 0.95  # 更多保留原始音频
+        filter_order = 1  # 降低滤波器阶数
     elif intensity == 'strong':
         hp_freq = 400
         bp_freqs = [2500, 10000]
-        mix_ratio = 0.6
+        mix_ratio = 0.7
+        filter_order = 2
     else:  # medium
         hp_freq = 300
         bp_freqs = [2000, 8000]
-        mix_ratio = 0.7
+        mix_ratio = 0.8
+        filter_order = 1
     
-    # 应用多段EQ
-    b1, a1 = signal.butter(4, hp_freq/(sr/2), 'highpass')
-    b2, a2 = signal.butter(4, [bp_freqs[0]/(sr/2), bp_freqs[1]/(sr/2)], 'bandpass')
-    
-    # 高通滤波去除低频噪音
-    audio_hp = signal.filtfilt(b1, a1, audio)
-    
-    # 中频增强
-    audio_bp = signal.filtfilt(b2, a2, audio)
-    
-    # 混合处理后的音频
-    clean_audio = audio_hp * mix_ratio + audio_bp * (1 - mix_ratio)
-    
-    return clean_audio
+    try:
+        # 应用简单的高通滤波
+        b1, a1 = signal.butter(filter_order, hp_freq/(sr/2), 'highpass')
+        audio_hp = signal.filtfilt(b1, a1, audio)
+        
+        # 如果音频长度足够，尝试应用带通滤波
+        if len(audio) > 100:  # 确保音频长度足够长
+            try:
+                b2, a2 = signal.butter(filter_order, [bp_freqs[0]/(sr/2), bp_freqs[1]/(sr/2)], 'bandpass')
+                audio_bp = signal.filtfilt(b2, a2, audio)
+            except Exception as e:
+                print(f"Warning: Bandpass filter failed: {str(e)}")
+                audio_bp = audio  # 如果带通滤波失败，使用原始音频
+        else:
+            audio_bp = audio
+        
+        # 使用更温和的混合方式
+        clean_audio = audio * mix_ratio + (audio_hp * 0.6 + audio_bp * 0.4) * (1 - mix_ratio)
+        
+        # 确保输出音频没有爆音
+        clean_audio = np.clip(clean_audio, -1.0, 1.0)
+        
+        return clean_audio
+    except Exception as e:
+        print(f"Warning: Error in clean_muddy_audio: {str(e)}")
+        return audio  # 如果处理失败，返回原始音频
 
 def optimize_vocals(vocals, sr=44100, mode='standard'):
     """
@@ -114,43 +134,54 @@ def optimize_vocals(vocals, sr=44100, mode='standard'):
         gain[mask] = np.power(10, (threshold + (db[mask] - threshold) / ratio) / 20)
         return audio * gain
     
-    # 根据模式选择参数
-    if mode == 'aggressive':
-        threshold = -15
-        ratio = 5
-        hp_freq = 80
-        lp_freq = 16000
-    elif mode == 'gentle':
-        threshold = -25
-        ratio = 3
-        hp_freq = 40
-        lp_freq = 20000
-    elif mode == 'clear':
-        threshold = -20
-        ratio = 4
-        hp_freq = 100
-        lp_freq = 18000
-    elif mode == 'warm':
-        threshold = -22
-        ratio = 3.5
-        hp_freq = 50
-        lp_freq = 12000
-    else:  # standard
-        threshold = -20
-        ratio = 4
-        hp_freq = 60
-        lp_freq = 18000
-    
-    # 应用处理
-    vocals = compress_dynamic_range(vocals, threshold=threshold, ratio=ratio)
-    
-    # 去除极低频
-    vocals = lr_filter(vocals, hp_freq, 'highpass', order=8)
-    
-    # 去除极高频噪音
-    vocals = lr_filter(vocals, lp_freq, 'lowpass', order=6)
-    
-    return vocals
+    try:
+        # 根据模式选择参数
+        if mode == 'aggressive':
+            threshold = -15
+            ratio = 5
+            hp_freq = 80
+            lp_freq = 16000
+        elif mode == 'gentle':
+            threshold = -35  # 更温和的阈值
+            ratio = 2.0     # 更温和的压缩比
+            hp_freq = 20    # 保留更多低频
+            lp_freq = 18000 # 保留更多高频细节
+        elif mode == 'clear':
+            threshold = -20
+            ratio = 4
+            hp_freq = 100
+            lp_freq = 18000
+        elif mode == 'warm':
+            threshold = -25
+            ratio = 3.0
+            hp_freq = 40
+            lp_freq = 12000
+        else:  # standard
+            threshold = -20
+            ratio = 4
+            hp_freq = 60
+            lp_freq = 18000
+        
+        # 应用处理
+        vocals = compress_dynamic_range(vocals, threshold=threshold, ratio=ratio)
+        
+        # 使用更温和的滤波器阶数
+        vocals = lr_filter(vocals, hp_freq, 'highpass', order=2)
+        vocals = lr_filter(vocals, lp_freq, 'lowpass', order=2)
+        
+        # 添加轻微的平滑处理
+        if mode == 'gentle':
+            try:
+                window_size = min(5, len(vocals) - 1)
+                if window_size > 2:  # 确保窗口大小足够
+                    vocals = signal.savgol_filter(vocals, window_size, 2, axis=0)
+            except Exception as e:
+                print(f"Warning: Smoothing failed: {str(e)}")
+        
+        return vocals
+    except Exception as e:
+        print(f"Warning: Error in optimize_vocals: {str(e)}")
+        return vocals  # 如果处理失败，返回原始音频
 
 def get_models(name, device, load=True, vocals_model_type=0):
     if vocals_model_type == 2:
@@ -481,7 +512,7 @@ class EnsembleDemucsMDXMusicSeparationModel:
         self.model_folder = os.path.join('/content/MVSEP-MDX23-Colab_v2/models/MDX_Net_Models')
         if not os.path.exists(self.model_folder):
             os.makedirs(self.model_folder, exist_ok=True)
-            
+        
         self.options = options
 
 
@@ -709,10 +740,10 @@ class EnsembleDemucsMDXMusicSeparationModel:
                 print(f'本地配置文件不存在: {yaml_path}')
                 print('正在尝试下载...')
             
+            remote_url_ckpt = 'https://huggingface.co/TRvlvr/model_repo/resolve/main/MDX23C-8KFFT-InstVoc_HQ_2.ckpt'
+            remote_url_yaml = 'https://raw.githubusercontent.com/TRvlvr/application_data/main/mdx_model_data/mdx_c_configs/model_2_stem_full_band_8k.yaml'
+            
             try:
-                remote_url_ckpt = 'https://huggingface.co/TRvlvr/model_repo/resolve/main/MDX23C-8KFFT-InstVoc_HQ_2.ckpt'
-                remote_url_yaml = 'https://raw.githubusercontent.com/TRvlvr/application_data/main/mdx_model_data/mdx_c_configs/model_2_stem_full_band_8k.yaml'
-                
                 self.model_mdxv3_2, self.config_mdxv3_2 = self.load_model(
                     'MDX23C-8KFFT-InstVoc_HQ_2',
                     remote_url_ckpt,
@@ -1014,15 +1045,15 @@ class EnsembleDemucsMDXMusicSeparationModel:
         if options.get('clean_muddy', False):
             print('Applying muddy audio cleaning...')
             vocals = clean_muddy_audio(vocals, sr=sample_rate, 
-                                     intensity=options.get('muddy_clean_intensity', 'medium'))
+                                     intensity=options.get('muddy_clean_intensity', 'light'))
         
         if options.get('optimize_vocals', False):
             print('Applying vocal optimization...')
             vocals = optimize_vocals(vocals, sr=sample_rate,
-                                   mode=options.get('vocal_optimize_mode', 'standard'))
+                                   mode=options.get('vocal_optimize_mode', 'gentle'))
 
         if options['filter_vocals'] is True:
-            vocals = lr_filter(vocals, 50, 'highpass', order=8)
+                vocals = lr_filter(vocals, 50, 'highpass', order=8)
         
         # 根据预设进行额外的处理
         if options.get('model_preset') == 'clear_vocals':
@@ -1214,30 +1245,28 @@ def predict_with_model(options):
         print("Input audio: {} Sample rate: {}".format(audio_adjusted.shape, sr))
         result, sample_rates = model.separate_music_file(audio_adjusted.T, sr, i, len(input_paths))
         
-        for instrum in model.instruments:
-            output_name = os.path.splitext(os.path.basename(input_audio))[0] + '_{}.{}'.format(instrum, output_extension)
-            if options["restore_gain"] is True: #restoring original gain
-                result[instrum] = dBgain(result[instrum], -options['input_gain'])
-            sf.write(output_folder + '/' + output_name, result[instrum], sample_rates[instrum], subtype=output_format)
-            print('File created: {}'.format(output_folder + '/' + output_name))
-
-        # instrumental part 1
-        # inst = (audio.T - result['vocals'])
-        inst = result['instrum']
-
-        if options["restore_gain"] is True: #restoring original gain
-            inst = dBgain(inst, -options['input_gain'])
-
-        output_name = os.path.splitext(os.path.basename(input_audio))[0] + '_{}.{}'.format('instrum', output_extension)
-        sf.write(output_folder + '/' + output_name, inst, sr, subtype=output_format)
-        print('File created: {}'.format(output_folder + '/' + output_name))
+        # 只保存人声文件
+        output_name = os.path.splitext(os.path.basename(input_audio))[0] + '_vocals.{}'.format(output_extension)
+        if options["restore_gain"] is True:
+            result['vocals'] = dBgain(result['vocals'], -options['input_gain'])
+        output_path = os.path.join(output_folder, output_name)
+        sf.write(output_path, result['vocals'], sample_rates['vocals'], subtype=output_format)
+        print('File created: {}'.format(output_path))
         
-        if options['vocals_only'] is False:
-            # instrumental part 2
-            inst2 = (result['bass'] + result['drums'] + result['other'])
-            output_name = os.path.splitext(os.path.basename(input_audio))[0] + '_{}.{}'.format('instrum2', output_extension)
-            sf.write(output_folder + '/' + output_name, inst2, sr, subtype=output_format)
-            print('File created: {}'.format(output_folder + '/' + output_name))
+        # 下载处理完的文件
+        try:
+            from google.colab import files
+            files.download(output_path)
+            print(f'已启动下载: {output_name}')
+        except ImportError:
+            print('注意：不在 Colab 环境中，跳过下载步骤')
+        except Exception as e:
+            print(f'下载文件时出错: {str(e)}')
+            
+        # 清理内存
+        del result
+        gc.collect()
+        torch.cuda.empty_cache()
 
 
 # Linkwitz-Riley filter
@@ -1309,14 +1338,14 @@ if __name__ == '__main__':
         'use_VOCFT': False,
         'clean_muddy': True,
         'optimize_vocals': True,
+        'muddy_clean_intensity': 'light',
+        'vocal_optimize_mode': 'gentle',
+        'model_preset': 'clear_vocals',
         'BSRoformer_model': 'ep_368_1296',
         'output_format': 'FLAC',
         'input_gain': 0,
         'restore_gain': False,
         'filter_vocals': True,
-        'muddy_clean_intensity': 'medium',
-        'vocal_optimize_mode': 'standard',
-        'model_preset': 'balanced'
     }
 
     # 创建输出文件夹（如果不存在）
